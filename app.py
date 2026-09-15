@@ -7,6 +7,9 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
+# Suppress harmless Hugging Face telemetry warning
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
@@ -17,7 +20,7 @@ LLM_MODEL = "qwen-plus"
 EMBED_MODEL = "BAAI/bge-small-en-v1.5" 
 CHUNKS_FILE = "./data/chunks.json"
 DB_DIR = "./chroma_db"
-MAX_HISTORY = 10  # Keep last 10 user-assistant exchanges (20 messages total)
+MAX_HISTORY = 10  # Keep last 10 user-assistant exchanges
 
 if not API_KEY:
     st.error("❌ Missing DASHSCOPE_API_KEY. Please add it to .streamlit/secrets.toml or set it as an environment variable.")
@@ -40,7 +43,7 @@ def get_dynamic_greeting():
     return f"{time_greeting}! I am your Senior ATC Training Officer and Compliance Analyst assistant.\n\nI can help you with:\n• **Q&A / Procedural Lookup**\n• **Document Drafting** (Manuals, UOIs, Memos, SOPs)\n• **Regulation Research**\n• **Document Discrepancy Analysis**\n\nHow can I help you today?"
 
 # ==========================================
-# 3. THE FULL SYSTEM PROMPT (Always remembered)
+# 3. THE FULL SYSTEM PROMPT
 # ==========================================
 SYSTEM_PROMPT = """You are a Senior Air Traffic Controller with extensive operational experience.
 You also serve as an ATC Training Officer, Regulatory Document Author, and Compliance Analyst.
@@ -232,7 +235,6 @@ with st.sidebar:
         with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
             chunk_data = json.load(f)
         
-        # Extract unique document names and sort them alphabetically
         unique_docs = sorted(list(set(item["source"] for item in chunk_data)))
         
         with st.expander(f"📚 Available Documents ({len(unique_docs)})"):
