@@ -22,7 +22,6 @@ logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.ERROR)
 API_KEY = st.secrets.get("DASHSCOPE_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
-# You can change this to "qwen-max", "qwen-turbo", or "qwen-long"
 LLM_MODEL = "qwen-plus"          
 EMBED_MODEL = "BAAI/bge-small-en-v1.5" 
 CHUNKS_FILE = "./data/chunks.json"
@@ -53,10 +52,10 @@ if st.session_state.get("authentication_status"):
     username = st.session_state.get("username")
 
     # ==========================================
-    # 3. DYNAMIC GREETING HELPER
+    # 3. DYNAMIC GREETING HELPER (Fixed to use current session name)
     # ==========================================
-    def get_dynamic_greeting():
-        return f"Greetings, {name}! I am your Senior Air Traffic Control Professional with extensive operational, regulatory, and training expertise.\n\nI can help you with:\n• **Q&A / Procedural Lookup**\n• **Document Drafting** (Manuals, UOIs, Memos, SOPs, Risk Assessments)\n• **Regulation Research**\n• **Document Discrepancy Analysis**\n\nHow can I help you today?"
+    def get_dynamic_greeting(user_name):
+        return f"Greetings, {user_name}! I am your Senior Air Traffic Control Professional with extensive operational, regulatory, and training expertise.\n\nI can help you with:\n• **Q&A / Procedural Lookup**\n• **Document Drafting** (Manuals, UOIs, Memos, SOPs, Risk Assessments)\n• **Regulation Research**\n• **Document Discrepancy Analysis**\n\nHow can I help you today?"
 
     # ==========================================
     # 4. THE FULL SYSTEM PROMPT
@@ -250,18 +249,23 @@ Question: {query}"""
     # ==========================================
     st.set_page_config(page_title="ATC Knowledge Assistant", page_icon="📘", layout="wide")
 
-    # CSS to hide the Deploy button (Cat logo), footer, and 3-dot menu
+    # CSS to forcefully hide Deploy button, footer, and 3-dot menu
     st.markdown("""
     <style>
-    .stDeployButton {display: none;}
-    footer {visibility: hidden;}
-    footer:after {visibility: hidden;}
-    #MainMenu {visibility: hidden;}
+    /* Force hide Deploy button (Git/Cat logo) */
+    [data-testid="stDeployButton"] {display: none !important;}
+    .stDeployButton {display: none !important;}
+    
+    /* Force hide footer and main menu */
+    footer {visibility: hidden !important;}
+    #MainMenu {visibility: hidden !important;}
+    
+    /* General styling */
     .stApp {max-width: 1200px; margin: 0 auto;}
     </style>
     """, unsafe_allow_html=True)
 
-    st.title("📘 ATC Knowledge Assistant")
+    st.title("ATC Knowledge Assistant")
     st.caption("Professional Air Traffic Control Knowledge Management System | Local Embeddings | Source Tracking | Session Memory")
 
     with st.sidebar:
@@ -269,42 +273,22 @@ Question: {query}"""
         st.markdown(f"**Username:** {username}")
         
         authenticator.logout('Logout', 'sidebar')
-        
         st.divider()
-        st.header("ℹ️ System Info")
         
-        # ==========================================
-        # BULLETPROOF DEBUG FOR CHUNKS.JSON
-        # ==========================================
+        # Load and display available documents (Clean, no debug info)
         if os.path.exists(CHUNKS_FILE):
             try:
-                file_size = os.path.getsize(CHUNKS_FILE)
-                st.info(f"🔍 SERVER DEBUG: File size is {file_size} bytes")
-                
                 with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
-                    first_chars = f.read(50)
-                    st.info(f"🔍 SERVER DEBUG: First 50 chars: `{repr(first_chars)}`")
-                    f.seek(0) # Reset to beginning of file
-                    
-                    if file_size == 0 or not first_chars.strip():
-                        st.error("❌ The file on the Streamlit server is completely empty!")
-                        st.stop()
-                        
                     chunk_data = json.load(f)
                 
                 unique_docs = sorted(list(set(item["source"] for item in chunk_data)))
                 with st.expander(f"📚 Available Documents ({len(unique_docs)})"):
                     for doc in unique_docs:
                         st.markdown(f"- {doc}")
-                        
-            except json.JSONDecodeError as e:
-                st.error(f"❌ JSON Decode Error: {e}")
-                st.stop()
             except Exception as e:
-                st.error(f"❌ Error loading documents: {e}")
-                st.stop()
+                st.error("❌ Error loading document list.")
         else:
-            st.warning("Data chunks not found. Please run `export_chunks.py`.")
+            st.warning("Data chunks not found.")
             
         st.divider()
         st.markdown("### 💡 Supported Modes:")
@@ -315,14 +299,13 @@ Question: {query}"""
         
         st.divider()
         if st.button("🗑️ Clear Chat History"):
-            st.session_state.messages = [{"role": "assistant", "content": get_dynamic_greeting()}]
+            st.session_state.messages = [{"role": "assistant", "content": get_dynamic_greeting(name)}]
             st.rerun()
 
-    # Initialize chat history with dynamic greeting
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            {"role": "assistant", "content": get_dynamic_greeting()}
-        ]
+    # FIX: Reset chat history if a new user logs in, ensuring the correct name is used
+    if "messages" not in st.session_state or st.session_state.get("last_user") != username:
+        st.session_state.messages = [{"role": "assistant", "content": get_dynamic_greeting(name)}]
+        st.session_state.last_user = username
 
     # Display chat messages from history
     for message in st.session_state.messages:
