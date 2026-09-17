@@ -1,14 +1,20 @@
 import os
 import json
 import datetime
+import logging
 import streamlit as st
 from openai import OpenAI
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from user_manager import UserManager
 
-# Suppress harmless Hugging Face telemetry warning
+# ==========================================
+# SUPPRESS HARMLESS WARNINGS
+# ==========================================
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.ERROR)
 
 # ==========================================
 # 1. CONFIGURATION
@@ -20,7 +26,7 @@ LLM_MODEL = "qwen-plus"
 EMBED_MODEL = "BAAI/bge-small-en-v1.5" 
 CHUNKS_FILE = "./data/chunks.json"
 DB_DIR = "./chroma_db"
-MAX_HISTORY = 10  # Keep last 10 user-assistant exchanges
+MAX_HISTORY = 10
 
 if not API_KEY:
     st.error("❌ Missing DASHSCOPE_API_KEY. Please add it to .streamlit/secrets.toml or set it as an environment variable.")
@@ -29,28 +35,37 @@ if not API_KEY:
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 # ==========================================
-# 2. DYNAMIC GREETING HELPER
+# 2. AUTHENTICATION (NO CACHE - causes CachedWidgetWarning)
 # ==========================================
-def get_dynamic_greeting():
-    current_hour = datetime.datetime.now().hour
-    if 5 <= current_hour < 12:
-        time_greeting = "Good morning"
-    elif 12 <= current_hour < 18:
-        time_greeting = "Good afternoon"
-    else:
-        time_greeting = "Good evening"
-        
-    return f"{time_greeting}! I am your Senior ATC Training Officer and Compliance Analyst assistant.\n\nI can help you with:\n• **Q&A / Procedural Lookup**\n• **Document Drafting** (Manuals, UOIs, Memos, SOPs)\n• **Regulation Research**\n• **Document Discrepancy Analysis**\n\nHow can I help you today?"
+if 'logout' not in st.session_state:
+    st.session_state['logout'] = False
 
-# ==========================================
-# 3. THE FULL SYSTEM PROMPT
-# ==========================================
-SYSTEM_PROMPT = """You are a Senior Air Traffic Controller with extensive operational experience.
-You also serve as an ATC Training Officer, Regulatory Document Author, and Compliance Analyst.
+def get_authenticator():
+    user_manager = UserManager()
+    return user_manager.get_authenticator()
+
+authenticator = get_authenticator()
+
+authenticator.login(location='main')
+
+if st.session_state.get("authentication_status"):
+    name = st.session_state.get("name")
+    username = st.session_state.get("username")
+
+    # ==========================================
+    # 3. DYNAMIC GREETING HELPER
+    # ==========================================
+    def get_dynamic_greeting():
+        return f"Greetings, {name}! I am your Senior Air Traffic Control Professional with extensive operational, regulatory, and training expertise.\n\nI can help you with:\n• **Q&A / Procedural Lookup**\n• **Document Drafting** (Manuals, UOIs, Memos, SOPs, Risk Assessments)\n• **Regulation Research**\n• **Document Discrepancy Analysis**\n\nHow can I help you today?"
+
+    # ==========================================
+    # 4. THE FULL SYSTEM PROMPT (UPDATED)
+    # ==========================================
+    SYSTEM_PROMPT = """You are a Senior Air Traffic Control Professional with extensive operational, regulatory, and training expertise.
 
 Your responsibilities include:
   • Training and evaluating ATC personnel
-  • Drafting Manuals, Units of Instruction (UOIs), Memos, SOPs, and Notices in standardized ICAO/State format
+  • Drafting Manuals, Units of Instruction (UOIs), Memos, SOPs, Notices, Safety Risk Assessments, and Investigation Reports in standardized ICAO/State format
   • Researching current and historical ICAO, State, and Unit regulations
   • Comparing documents to identify discrepancies, conflicts, and amendments
 
@@ -70,12 +85,19 @@ Follow this priority order WITHOUT exception:
 
   TIER 2 — Your Pre-Trained Knowledge
     → Use ONLY if the answer is genuinely absent from [RETRIEVED CONTEXT].
-    → Limited to: ICAO Doc 4444 (PANS-ATM), ICAO Annex 2, 11, 14, Doc 8168 (PANS-OPS), Doc 9432, and universally recognized standard ATC procedures.
+    → Limited to: ICAO Doc 4444 (PANS-ATM), ICAO Annex 2, 11, 14, Doc 8168 (PANS-OPS), Doc 9432, Doc 9859 (Safety Management), and universally recognized standard ATC procedures.
     → Do NOT use general knowledge for unit-specific, State-specific, or locally defined procedures, minima, airspace structures, or phraseology — these vary by region and you WILL be wrong.
 
   DISCLOSURE RULE:
-    Whenever you use Tier 2 knowledge, you MUST begin your answer with exactly:
+    Whenever you use Tier 2 knowledge for Q&A or research, you MUST begin your answer with exactly:
     "[⚠️ This information was not found in the provided local documents. The following is based on general ICAO/standard ATC knowledge and must be verified against your local authority before operational use.]"
+
+  DRAFTING EXCEPTION:
+    When the user asks you to DRAFT a new document (Mode B — Document Drafting):
+    → If [RETRIEVED CONTEXT] contains specific templates, methodologies, or regulatory requirements, use them as your primary reference.
+    → If [RETRIEVED CONTEXT] does NOT contain relevant templates or methodologies, you MAY use your pre-trained knowledge of standard ICAO/industry practices (e.g., ICAO Doc 9859 Safety Management Manual, standard risk assessment methodologies, typical UOI structures) to propose a draft.
+    → Clearly mark any sections or content that are based on general best practices (not from local documents) with: [⚠️ BASED ON GENERAL BEST PRACTICES — REQUIRES LOCAL VERIFICATION]
+    → This exception applies ONLY to drafting tasks, NOT to Q&A or procedural lookup.
 
 ═══════════════════════════════════════
 SECTION 2 — CITATION FORMAT (MANDATORY)
@@ -106,14 +128,19 @@ MODE A — Q&A / Procedural Lookup
   • End with all relevant citations.
 
 ─────────────────────────────
-MODE B — Document Drafting (Manuals, UOIs, Memos, SOPs)
+MODE B — Document Drafting (Manuals, UOIs, Memos, SOPs, Risk Assessments, Investigation Reports)
 ─────────────────────────────
   • Use formal, imperative, unambiguous language consistent with ICAO documentation standards.
-  • Structure the output with standard headings (e.g., Purpose, Scope, References, Definitions, Procedure, Responsibilities, Effective Date).
-  • For UOIs specifically, include: Lesson Objective, Prerequisites, Content Outline, Training Method, Assessment Criteria, and References.
-  • For Memos, include: Reference Number, Date, Subject, Addressees, Body, Action Required, and Signature Block placeholder.
+  • Structure the output with standard headings appropriate to the document type.
+  • If [RETRIEVED CONTEXT] contains relevant templates or regulatory requirements, follow them exactly.
+  • If [RETRIEVED CONTEXT] does NOT contain relevant templates, you MAY use your knowledge of standard ICAO/industry methodologies to propose a draft structure. Examples:
+      - Safety Risk Analysis: Use standard risk matrix (Severity × Likelihood), hazard identification process, mitigation hierarchy
+      - UOI: Include Lesson Objective, Prerequisites, Content Outline, Training Method, Assessment Criteria, References
+      - Investigation Report: Use standard structure (Background, Facts, Analysis, Findings, Safety Recommendations)
+      - Memo: Include Reference Number, Date, Subject, Addressees, Body, Action Required, Signature Block
   • Mark any placeholder or variable fields with [INSERT ___].
-  • Flag any section where local data was unavailable from [RETRIEVED CONTEXT] with [⚠️ REQUIRES LOCAL VERIFICATION].
+  • Mark any section where you used general best practices (not from local documents) with [⚠️ BASED ON GENERAL BEST PRACTICES — REQUIRES LOCAL VERIFICATION].
+  • If the user provides a specific document title (e.g., "based on CAD-19-Safety-Management"), check [RETRIEVED CONTEXT] for that document. If it's not there, state: "The specified document was not found in the local knowledge base. I will draft based on standard ICAO/industry practices."
 
 ─────────────────────────────
 MODE C — Regulation Research
@@ -152,6 +179,16 @@ SECTION 4 — SAFETY & ANTI-HALLUCINATION GUARDRAILS
      Use: "[⚠️ Uncertain — this could not be confirmed from the provided documents or standard references. Consult your local ATC authority.]"
   4. Do NOT combine information from two different documents as if they were one procedure unless the user explicitly asks for a synthesis.
   5. Always preserve the EXACT wording of phraseology and mandatory instructions. Never "simplify" or "paraphrase" standardized ATC phraseology.
+  6. DOCUMENT DRAFTING EXCEPTION:
+     When drafting new documents (Mode B), you are permitted to use your pre-trained knowledge of:
+       - Standard ICAO methodologies (e.g., safety risk assessment, safety management systems)
+       - Common document structures and templates
+       - Industry best practices for ATC training, operations, and compliance
+     However, you must:
+       - Clearly mark any content not sourced from [RETRIEVED CONTEXT] with [⚠️ BASED ON GENERAL BEST PRACTICES — REQUIRES LOCAL VERIFICATION]
+       - Never fabricate specific regulatory requirements, amendment numbers, or State-specific procedures
+       - If uncertain whether a requirement is local or general, state the uncertainty explicitly
+     This exception does NOT apply to Mode A (Q&A), Mode C (Regulation Research), or Mode D (Comparison Analysis), where strict citation rules remain in effect.
 
 ═══════════════════════════════════════
 SECTION 5 — CONVERSATION MEMORY
@@ -162,145 +199,155 @@ SECTION 5 — CONVERSATION MEMORY
   3. If a follow-up question refers to a document or topic discussed earlier in the conversation, maintain continuity and build upon your previous answers.
   4. If new [RETRIEVED CONTEXT] is provided for the current question, prioritize it. If no new context is provided, you may reference context from earlier in the conversation."""
 
-# ==========================================
-# 4. LOAD & PROCESS JSON DATA (CACHED)
-# ==========================================
-@st.cache_resource(show_spinner="📚 Loading pre-chunked ATC data...")
-def get_retriever():
-    if not os.path.exists(CHUNKS_FILE):
-        st.error(f"❌ Missing {CHUNKS_FILE}. Please run `export_chunks.py` first to generate it.")
-        st.stop()
-        
-    with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
-        chunk_data = json.load(f)
-    
-    documents = [
-        Document(page_content=item["text"], metadata={"source": item["source"], "page": item["page"]})
-        for item in chunk_data
-    ]
-    
-    embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
-
-    if os.path.exists(DB_DIR) and os.listdir(DB_DIR):
-        vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-    else:
-        vectorstore = Chroma.from_documents(documents=documents, embedding=embeddings, persist_directory=DB_DIR)
-    
-    return vectorstore.as_retriever(search_kwargs={"k": 4}), len(chunk_data)
-
-def format_docs(docs):
-    formatted = []
-    for doc in docs:
-        src = doc.metadata.get("source", "Unknown File")
-        pg = doc.metadata.get("page", "?")
-        formatted.append(f"[Source: {src} | Page: {pg}]\n{doc.page_content}")
-    return "\n\n---\n\n".join(formatted)
-
-# ==========================================
-# 5. BUILD MESSAGES WITH HISTORY
-# ==========================================
-def build_messages(query, context):
-    messages = []
-    messages.append({"role": "system", "content": SYSTEM_PROMPT})
-    
-    history = st.session_state.messages[1:]  # Skip the initial assistant greeting
-    max_messages = MAX_HISTORY * 2
-    if len(history) > max_messages:
-        history = history[-max_messages:]
-    
-    for msg in history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-    
-    user_content = f"""[RETRIEVED CONTEXT]:
-{context}
-
-Question: {query}"""
-    
-    messages.append({"role": "user", "content": user_content})
-    return messages
-
-# ==========================================
-# 6. STREAMLIT UI
-# ==========================================
-st.set_page_config(page_title="ATC Manual Assistant", page_icon="✈️", layout="wide")
-
-st.title("✈️ ATC Manual Q&A & Drafting Assistant")
-st.caption("Powered by Qwen API | Local Embeddings | Source Tracking | Multi-Mode Analysis | Session Memory")
-
-with st.sidebar:
-    st.header("ℹ️ System Info")
-    
-    # Collapsible list of available documents
-    if os.path.exists(CHUNKS_FILE):
+    # ==========================================
+    # 5. LOAD & PROCESS JSON DATA (CACHED)
+    # ==========================================
+    @st.cache_resource(show_spinner="📚 Loading pre-chunked ATC data...")
+    def get_retriever():
+        if not os.path.exists(CHUNKS_FILE):
+            st.error(f"❌ Missing {CHUNKS_FILE}. Please run `export_chunks.py` first to generate it.")
+            st.stop()
+            
         with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
             chunk_data = json.load(f)
         
-        unique_docs = sorted(list(set(item["source"] for item in chunk_data)))
+        documents = [
+            Document(page_content=item["text"], metadata={"source": item["source"], "page": item["page"]})
+            for item in chunk_data
+        ]
         
-        with st.expander(f"📚 Available Documents ({len(unique_docs)})"):
-            for doc in unique_docs:
-                st.markdown(f"- {doc}")
-    else:
-        st.warning("Data chunks not found. Please run `export_chunks.py`.")
+        embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL)
+
+        if os.path.exists(DB_DIR) and os.listdir(DB_DIR):
+            vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
+        else:
+            vectorstore = Chroma.from_documents(documents=documents, embedding=embeddings, persist_directory=DB_DIR)
         
-    st.divider()
-    st.markdown("### 💡 Supported Modes:")
-    st.markdown("- **Mode A:** Q&A / Procedural Lookup")
-    st.markdown("- **Mode B:** Document Drafting (SOPs, Memos, UOIs)")
-    st.markdown("- **Mode C:** Regulation Research")
-    st.markdown("- **Mode D:** Discrepancy / Comparison Analysis")
-    
-    st.divider()
-    if st.button("🗑️ Clear Chat History"):
-        st.session_state.messages = [{"role": "assistant", "content": get_dynamic_greeting()}]
-        st.rerun()
+        return vectorstore.as_retriever(search_kwargs={"k": 4})
 
-# Initialize chat history with dynamic greeting
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": get_dynamic_greeting()}
-    ]
+    def format_docs(docs):
+        formatted = []
+        for doc in docs:
+            src = doc.metadata.get("source", "Unknown File")
+            pg = doc.metadata.get("page", "?")
+            formatted.append(f"[Source: {src} | Page: {pg}]\n{doc.page_content}")
+        return "\n\n---\n\n".join(formatted)
 
-# Display chat messages from history
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# React to user input
-if query := st.chat_input("Ask an ATC question, request a document draft, or compare regulations..."):
-    st.session_state.messages.append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.markdown(query)
-    
-    with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        full_response = ""
+    # ==========================================
+    # 6. BUILD MESSAGES WITH HISTORY
+    # ==========================================
+    def build_messages(query, context):
+        messages = []
+        messages.append({"role": "system", "content": SYSTEM_PROMPT})
         
-        try:
-            retriever, _ = get_retriever()
-            docs = retriever.invoke(query)
-            context = format_docs(docs)
+        history = st.session_state.messages[1:]
+        max_messages = MAX_HISTORY * 2
+        if len(history) > max_messages:
+            history = history[-max_messages:]
+        
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        
+        user_content = f"""[RETRIEVED CONTEXT]:
+{context}
 
-            messages = build_messages(query, context)
+Question: {query}"""
+        
+        messages.append({"role": "user", "content": user_content})
+        return messages
 
-            stream = client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=messages,
-                temperature=0.0,
-                stream=True
-            )
+    # ==========================================
+    # 7. STREAMLIT UI
+    # ==========================================
+    st.set_page_config(page_title="ATC Knowledge Assistant", page_icon="📘", layout="wide")
 
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    message_placeholder.markdown(full_response + "▌")
+    st.title("📘 ATC Knowledge Assistant")
+    st.caption("Professional Air Traffic Control Knowledge Management System | Local Embeddings | Source Tracking | Session Memory")
+
+    with st.sidebar:
+        st.markdown(f"### 👤 {name}")
+        st.markdown(f"**Username:** {username}")
+        
+        authenticator.logout('Logout', 'sidebar')
+        
+        st.divider()
+        st.header("ℹ️ System Info")
+        
+        if os.path.exists(CHUNKS_FILE):
+            with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
+                chunk_data = json.load(f)
             
-            message_placeholder.markdown(full_response)
+            unique_docs = sorted(list(set(item["source"] for item in chunk_data)))
             
-        except Exception as e:
-            error_msg = f"❌ Error: {str(e)}"
-            message_placeholder.markdown(error_msg)
-            full_response = error_msg
+            with st.expander(f"📚 Available Documents ({len(unique_docs)})"):
+                for doc in unique_docs:
+                    st.markdown(f"- {doc}")
+        else:
+            st.warning("Data chunks not found. Please run `export_chunks.py`.")
+            
+        st.divider()
+        st.markdown("### 💡 Supported Modes:")
+        st.markdown("- **Mode A:** Q&A / Procedural Lookup")
+        st.markdown("- **Mode B:** Document Drafting (SOPs, Memos, UOIs, Risk Assessments)")
+        st.markdown("- **Mode C:** Regulation Research")
+        st.markdown("- **Mode D:** Discrepancy / Comparison Analysis")
+        
+        st.divider()
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.messages = [{"role": "assistant", "content": get_dynamic_greeting()}]
+            st.rerun()
 
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    # Initialize chat history with dynamic greeting
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": get_dynamic_greeting()}
+        ]
+
+    # Display chat messages from history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # React to user input
+    if query := st.chat_input("Ask an ATC question, request a document draft, or compare regulations..."):
+        st.session_state.messages.append({"role": "user", "content": query})
+        with st.chat_message("user"):
+            st.markdown(query)
+        
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            full_response = ""
+            
+            try:
+                retriever = get_retriever()
+                docs = retriever.invoke(query)
+                context = format_docs(docs)
+
+                messages = build_messages(query, context)
+
+                stream = client.chat.completions.create(
+                    model=LLM_MODEL,
+                    messages=messages,
+                    temperature=0.0,
+                    stream=True
+                )
+
+                for chunk in stream:
+                    if chunk.choices[0].delta.content is not None:
+                        content = chunk.choices[0].delta.content
+                        full_response += content
+                        message_placeholder.markdown(full_response + "▌")
+                
+                message_placeholder.markdown(full_response)
+                
+            except Exception as e:
+                error_msg = f"❌ Error: {str(e)}"
+                message_placeholder.markdown(error_msg)
+                full_response = error_msg
+
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+elif st.session_state.get("authentication_status") is False:
+    st.error('Username/password is incorrect')
+elif st.session_state.get("authentication_status") is None:
+    st.warning('Please enter your username and password')
