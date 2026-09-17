@@ -22,6 +22,7 @@ logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.ERROR)
 API_KEY = st.secrets.get("DASHSCOPE_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
 BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
+# You can change this to "qwen-max", "qwen-turbo", or "qwen-long"
 LLM_MODEL = "qwen-plus"          
 EMBED_MODEL = "BAAI/bge-small-en-v1.5" 
 CHUNKS_FILE = "./data/chunks.json"
@@ -272,30 +273,36 @@ Question: {query}"""
         st.divider()
         st.header("ℹ️ System Info")
         
+        # ==========================================
+        # BULLETPROOF DEBUG FOR CHUNKS.JSON
+        # ==========================================
         if os.path.exists(CHUNKS_FILE):
-            # --- TEMPORARY DEBUG CODE ---
-            file_size = os.path.getsize(CHUNKS_FILE)
-            st.info(f"🔍 DEBUG: File size of chunks.json is {file_size} bytes")
-            
-            with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
-                first_chars = f.read(100)
-                st.info(f"🔍 DEBUG: First 100 characters are: `{repr(first_chars)}`")
+            try:
+                file_size = os.path.getsize(CHUNKS_FILE)
+                st.info(f"🔍 SERVER DEBUG: File size is {file_size} bytes")
                 
-                # Reset file pointer to the beginning so json.load can read it
-                f.seek(0)
-                
-                try:
+                with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
+                    first_chars = f.read(50)
+                    st.info(f"🔍 SERVER DEBUG: First 50 chars: `{repr(first_chars)}`")
+                    f.seek(0) # Reset to beginning of file
+                    
+                    if file_size == 0 or not first_chars.strip():
+                        st.error("❌ The file on the Streamlit server is completely empty!")
+                        st.stop()
+                        
                     chunk_data = json.load(f)
-                except json.JSONDecodeError as e:
-                    st.error(f"❌ JSON Decode Error: {e}")
-                    st.stop()
-            # ----------------------------
-            
-            unique_docs = sorted(list(set(item["source"] for item in chunk_data)))
-            
-            with st.expander(f"📚 Available Documents ({len(unique_docs)})"):
-                for doc in unique_docs:
-                    st.markdown(f"- {doc}")
+                
+                unique_docs = sorted(list(set(item["source"] for item in chunk_data)))
+                with st.expander(f"📚 Available Documents ({len(unique_docs)})"):
+                    for doc in unique_docs:
+                        st.markdown(f"- {doc}")
+                        
+            except json.JSONDecodeError as e:
+                st.error(f"❌ JSON Decode Error: {e}")
+                st.stop()
+            except Exception as e:
+                st.error(f"❌ Error loading documents: {e}")
+                st.stop()
         else:
             st.warning("Data chunks not found. Please run `export_chunks.py`.")
             
