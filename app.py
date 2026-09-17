@@ -273,8 +273,23 @@ Question: {query}"""
         st.header("ℹ️ System Info")
         
         if os.path.exists(CHUNKS_FILE):
+            # --- TEMPORARY DEBUG CODE ---
+            file_size = os.path.getsize(CHUNKS_FILE)
+            st.info(f"🔍 DEBUG: File size of chunks.json is {file_size} bytes")
+            
             with open(CHUNKS_FILE, "r", encoding="utf-8") as f:
-                chunk_data = json.load(f)
+                first_chars = f.read(100)
+                st.info(f"🔍 DEBUG: First 100 characters are: `{repr(first_chars)}`")
+                
+                # Reset file pointer to the beginning so json.load can read it
+                f.seek(0)
+                
+                try:
+                    chunk_data = json.load(f)
+                except json.JSONDecodeError as e:
+                    st.error(f"❌ JSON Decode Error: {e}")
+                    st.stop()
+            # ----------------------------
             
             unique_docs = sorted(list(set(item["source"] for item in chunk_data)))
             
